@@ -51,14 +51,6 @@ if __name__ == '__main__':
     print(f"Scipy Slerp耗时: {end1 - start1:.6f}秒")
     euler_scipy = rot_scipy.as_euler('zyx', degrees=True)
 
-    # Interpolate using slerp in Slerp_test  
-    # start2 = time.perf_counter()
-    # quats_custom = []
-    # for t in times:
-    #     q_interp = Slerp_test(start_quat, end_quat, t)
-    #     quats_custom.append(q_interp)
-    # quats_custom = np.array(quats_custom)
-
     normalized_times = (times - np.min(times)) / (np.max(times) - np.min(times))
     
     start2 = time.perf_counter()
@@ -79,12 +71,12 @@ if __name__ == '__main__':
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
 
-    # # 画单位球面
-    # u, w = np.mgrid[0:2*np.pi:30j, 0:np.pi:15j]
-    # x = np.cos(u) * np.sin(w)
-    # y = np.sin(u) * np.sin(w)
-    # z = np.cos(w)
-    # ax.plot_surface(x, y, z, color='lightgray', alpha=0.2)
+    # 画单位球面
+    u, w = np.mgrid[0:2*np.pi:30j, 0:np.pi:15j]
+    x = np.cos(u) * np.sin(w)
+    y = np.sin(u) * np.sin(w)
+    z = np.cos(w)
+    ax.plot_surface(x, y, z, color='lightgray', alpha=0.2)
 
     # Scipy Slerp 路径
     ax.plot(vecs_scipy[:, 0], vecs_scipy[:, 1], vecs_scipy[:, 2],

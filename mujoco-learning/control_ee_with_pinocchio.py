@@ -22,7 +22,7 @@ def inverse_kinematics(current_q, target_dir, target_pos):
     oMdes = pinocchio.SE3(target_dir, np.array(target_pos))
 
     # 将当前关节角度赋值给变量 q，作为迭代的初始值
-    q = current_q
+    q = current_q[:JOINT_ID]
     # 定义收敛阈值，当误差小于该值时认为算法收敛
     eps = 1e-4
     # 定义最大迭代次数，防止算法陷入无限循环

@@ -18,7 +18,7 @@ def limit_angle(angle):
 def main():
     global cam
     # 加载模型
-    model = mujoco.MjModel.from_xml_path('./model/franka_emika_panda/scene.xml')
+    model = mujoco.MjModel.from_xml_path('/home/zxy/MujocoBin/mujoco_menagerie-main/franka_emika_panda/scene.xml')
     data = mujoco.MjData(model)
 
     # 打印所有 body 的 ID 和名称
