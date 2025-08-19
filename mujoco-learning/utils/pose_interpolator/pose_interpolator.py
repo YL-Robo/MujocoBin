@@ -266,6 +266,7 @@ class PoseInterpolator:
         ax.view_init(elev=30, azim=45)
         plt.tight_layout()
         plt.show()
+        
 def example_usage():
     """Example usage of the PoseInterpolator class."""
     

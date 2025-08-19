@@ -123,22 +123,16 @@ def plot_solve_times(solve_times):
     plt.show()
 
 
-model = mujoco.MjModel.from_xml_path('/home/zxy/MujocoBin/mujoco_menagerie-main/franka_emika_panda/scene.xml')
-data = mujoco.MjData(model)
-
 class CustomViewer:
     def __init__(self, model, data):
         self.handle = mujoco.viewer.launch_passive(model, data)
         self.pos = 0.0001
 
         # 找到末端执行器的 body id
-        self.end_effector_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, 'left_finger')
-        print(f"End effector ID: {self.end_effector_id}")
-        if self.end_effector_id == -1:
-            print("Warning: Could not find the end effector with the given name.")
+        self.end_effector_id = 7
 
         # 初始关节角度
-        self.initial_q = data.qpos[:9].copy()
+        self.initial_q = data.qpos[:].copy()
         print(f"Initial joint positions: {self.initial_q}")
         theta = np.pi
         self.R_x = np.array([
@@ -177,14 +171,18 @@ class CustomViewer:
                 self.new_q = np.array(new_q)
                 self.solve_times.append(solve_time)
                 self.err_histories.append(err_history)
-            data.qpos[:9] = new_q
+            data.qpos[:] = new_q
             mujoco.mj_step(model, data)
             self.sync()
 
-viewer = CustomViewer(model, data)
-viewer.cam.distance = 3
-viewer.cam.azimuth = -70
-viewer.cam.elevation = -20
-viewer.run_loop()
-plot_error_convergence(viewer.err_histories, idx=0)  # 第一次的误差收敛曲线
-plot_solve_times(viewer.solve_times)                 # 所有IK解的时间分布
+if __name__ == "__main__":
+    model = mujoco.MjModel.from_xml_path('/home/zxy/MujocoBin/mujoco_menagerie-main/franka_emika_panda/scene.xml')
+    data = mujoco.MjData(model)
+
+    viewer = CustomViewer(model, data)
+    viewer.cam.distance = 3
+    viewer.cam.azimuth = -70
+    viewer.cam.elevation = -20
+    viewer.run_loop()
+    plot_error_convergence(viewer.err_histories, idx=0)  # 第一次的误差收敛曲线
+    plot_solve_times(viewer.solve_times)                 # 所有IK解的时间分布

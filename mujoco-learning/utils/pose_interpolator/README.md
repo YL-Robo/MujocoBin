@@ -93,42 +93,7 @@ trajectory = interpolator.interpolate_pose(
 )
 ```
 
-### 5. 多路点轨迹
 
-```python
-# 定义多个路点
-waypoints = [
-    (np.array([0.0, 0.0, 0.0]), np.eye(3)),
-    (np.array([0.5, 0.0, 0.5]), R.from_euler('x', 30, degrees=True).as_matrix()),
-    (np.array([1.0, 0.5, 0.5]), R.from_euler('y', 45, degrees=True).as_matrix()),
-    (np.array([0.5, 1.0, 1.0]), R.from_euler('z', 60, degrees=True).as_matrix()),
-]
-
-# 生成完整轨迹
-trajectory = interpolator.generate_trajectory(
-    waypoints=waypoints,
-    steps_per_segment=30
-)
-```
-
-### 6. 轨迹比较
-
-```python
-# 生成两种不同方法的轨迹
-trajectory_so3 = interpolator.interpolate_pose(
-    start_pose, end_pose, n_steps=50, method="so3"
-)
-
-trajectory_slerp = interpolator.interpolate_pose(
-    start_pose, end_pose, n_steps=50, method="slerp"
-)
-
-# 比较轨迹
-interpolator.compare_trajectories(
-    trajectory_so3, trajectory_slerp,
-    labels=("SO(3) Geodesic", "Quaternion SLERP")
-)
-```
 
 ## 在机器人应用中的使用
 
@@ -181,37 +146,7 @@ for pos, rot in trajectory:
     mujoco.mj_step(model, data)
 ```
 
-### 机器人臂轨迹规划
 
-```python
-def plan_pick_and_place_trajectory(interpolator, pick_pos, place_pos):
-    """规划抓取和放置轨迹"""
-    
-    waypoints = [
-        # 起始位置
-        (np.array([0.0, 0.0, 0.5]), np.eye(3)),
-        
-        # 接近抓取位置
-        (pick_pos + np.array([0, 0, 0.1]), R.from_euler('z', 45, degrees=True).as_matrix()),
-        
-        # 抓取位置
-        (pick_pos, R.from_euler('z', 45, degrees=True).as_matrix()),
-        
-        # 提起物体
-        (pick_pos + np.array([0, 0, 0.2]), R.from_euler('z', 45, degrees=True).as_matrix()),
-        
-        # 移动到放置区域
-        (place_pos + np.array([0, 0, 0.2]), R.from_euler('xyz', [0, 0, 90], degrees=True).as_matrix()),
-        
-        # 放置位置
-        (place_pos, R.from_euler('xyz', [0, 0, 90], degrees=True).as_matrix()),
-        
-        # 返回起始位置
-        (np.array([0.0, 0.0, 0.5]), np.eye(3)),
-    ]
-    
-    return interpolator.generate_trajectory(waypoints, steps_per_segment=40)
-```
 
 ## API参考
 
@@ -235,22 +170,10 @@ def plan_pick_and_place_trajectory(interpolator, pick_pos, place_pos):
 **返回:**
 - 轨迹列表：`[(position, rotation_matrix), ...]`
 
-#### `generate_trajectory(waypoints, steps_per_segment=50, method=None)`
-通过多个路点生成完整轨迹。
-
-**参数:**
-- `waypoints`: 路点列表
-- `steps_per_segment`: 每段插值的步数
-- `method`: 插值方法
-
-**返回:**
-- 完整轨迹列表
 
 #### `plot_trajectory(trajectory, step=5, axis_len=0.02, title="Pose Trajectory")`
 绘制3D轨迹。
 
-#### `compare_trajectories(traj1, traj2, labels=("Trajectory 1", "Trajectory 2"), step=5, axis_len=0.02)`
-比较两个轨迹。
 
 ### 工具方法
 
@@ -286,7 +209,7 @@ SE(3)姿态插值结合了位置的线性插值和姿态的插值，生成完整
 
 ```bash
 cd mujoco-learning
-python example_pose_interpolator.py
+python3 pose_interpolator.py
 ```
 
 这将展示所有基本用法和可视化效果。
@@ -305,3 +228,4 @@ python example_pose_interpolator.py
 - 支持速度约束
 - 添加碰撞检测
 - 集成更多机器人框架
+
