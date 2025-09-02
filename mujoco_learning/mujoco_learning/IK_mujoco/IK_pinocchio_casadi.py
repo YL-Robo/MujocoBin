@@ -10,8 +10,14 @@ import casadi as cs
 import casadi
 from pinocchio import casadi as cpin
 import os
-from utils.pose_interpolator.pose_interpolator import PoseInterpolator
-from config.default_config import Config
+# import sys
+# from pathlib import Path
+# # Allow running this file directly via `python IK_mujoco/IK_pinocchio_casadi.py`
+# # by adding the project root (one level up) to sys.path so `utils` and `config` resolve.
+# sys.path.append(str(Path(__file__).resolve().parents[1]))
+from mujoco_learning.mujoco_learning.utils.pose_interpolator.pose_interpolator import PoseInterpolator
+from mujoco_learning.mujoco_learning.config.default_config import Config
+
 
 # 确保数据目录存在
 os.makedirs(Config.DATA_DIR, exist_ok=True)

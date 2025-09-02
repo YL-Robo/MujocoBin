@@ -3,7 +3,7 @@ import numpy as np
 class Config:
     """配置参数类"""
     # 文件路径
-    URDF_PATH = "/home/zxy/MujocoBin/mujoco-learning/model/franka_panda_description/robots/panda_description/urdf/panda.urdf"
+    URDF_PATH = "/home/zxy/MujocoBin/mujoco_learning/mujoco_learning/model/franka_panda_description/robots/panda_description/urdf/panda.urdf"
     XML_PATH = "/home/zxy/MujocoBin/mujoco_menagerie-main/franka_emika_panda/scene.xml"
     
     # 数据保存路径
