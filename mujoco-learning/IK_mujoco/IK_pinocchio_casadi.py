@@ -7,67 +7,60 @@ from numpy.linalg import norm, solve
 import time
 import matplotlib.pyplot as plt
 import casadi as cs
-from pinocchio import casadi as cpin
 import casadi
+from pinocchio import casadi as cpin
+import os
+from utils.pose_interpolator.pose_interpolator import PoseInterpolator
+from config.default_config import Config
 
-def Slerp_test(q0, q1, t):
-    q0 = np.asarray(q0)
-    q1 = np.asarray(q1)
-    # t 转换为一个NumPy 数组，并将其形状调整为一列(column) 的二维数组
-    t = np.asarray(t).reshape(-1, 1) 
+# 确保数据目录存在
+os.makedirs(Config.DATA_DIR, exist_ok=True)
 
-    dot = np.dot(q0, q1)
+def generate_safe_trajectory(model_pin, q_start, q_end, N_points=50):
+    """
+    生成安全的轨迹，避免奇异配置
+    
+    Args:
+        model_pin: Pinocchio模型
+        q_start, q_end: 起始和结束关节角度
+        N_points: 轨迹点数
+    """
+    # 计算起始和结束位姿
+    data_pin = model_pin.createData()
+    
+    pin.forwardKinematics(model_pin, data_pin, q_start)
+    p0 = data_pin.oMi[Config.JOINT_ID].translation.tolist()
+    q0 = R.from_matrix(data_pin.oMi[Config.JOINT_ID].rotation).as_quat().tolist()
 
-    # If the quaternions are very close, use linear interpolation
-    if dot > 0.9995:
-        q = q0 + t * (q1 - q0)
-        return q / np.linalg.norm(q, axis=1, keepdims=True)
+    pin.forwardKinematics(model_pin, data_pin, q_end)
+    p1 = data_pin.oMi[Config.JOINT_ID].translation.tolist()
+    q1 = R.from_matrix(data_pin.oMi[Config.JOINT_ID].rotation).as_quat().tolist()
+    
+    # 检查轨迹是否合理
+    distance = np.linalg.norm(np.array(p1) - np.array(p0))
+    if distance > 0.5:  # 如果距离太远，缩小目标
+        print(f"Warning: Target distance {distance:.3f}m is too large, scaling down")
+        scale = 0.5 / distance
+        p1_scaled = np.array(p0) + scale * (np.array(p1) - np.array(p0))
+        p1 = p1_scaled.tolist()
+    
+    # 生成轨迹
+    interpolator = PoseInterpolator()
+    traj_direct = interpolator.interpolate_se3_with_slerp(p0, p1, q0, q1, N_points, use_slerp=False)
+    traj_slerp = interpolator.interpolate_se3_with_slerp(p0, p1, q0, q1, N_points, use_slerp=True)
+    
+    return traj_direct, traj_slerp, p0, p1
 
-    # If the dot product is negative, negate q1 to take the shortest path
-    if dot < 0.0:
-        q1 = -q1
-        dot = -dot
-
-    theta = np.arccos(dot)
-    sin_theta = np.sin(theta)
-
-    s0 = np.sin((1 - t) * theta) / sin_theta
-    s1 = np.sin(t * theta) / sin_theta
-
-    q = s0 * q0 + s1 * q1
-    return q / np.linalg.norm(q, axis=1, keepdims=True)
-
-# 插值函数
-def interpolate_SE3(p0, p1, q0, q1, N, use_slerp=True):
-    times = np.linspace(0, 1, N)        # 生成 N 个插值时间点
-    normalized_times = (times - np.min(times)) / (np.max(times) - np.min(times))
-    positions = np.linspace(p0, p1, N)
-    if use_slerp:
-        # # scipy 的 Slerp
-        # key_rots = R.from_quat([q0, q1])    # 起点和终点四元数转为旋转对象
-        # slerp = Slerp([0, 1], key_rots)     # 创建 SLERP 插值器，关键帧时间为 0 和 1
-        # interp_rots = slerp(normalized_times)          # 得到 N 个插值旋转
-        # custom Slerp
-        quats_custom = Slerp_test(q0, q1, normalized_times)
-        quats_custom = np.array(quats_custom)
-        interp_rots = R.from_quat(quats_custom)
-    else:
-        interp_rots = [R.from_quat(q0)] * N
-
-    return [(positions[i], interp_rots[i].as_matrix()) for i in range(N)]
-
-# IK 求解函数
 def solve_ik_sequence(model, pos, rot, q_c=None):
-    # pinocchio 初始化
-    # model = pin.buildModelFromUrdf(model_path)
+    """使用Jacobian方法求解逆运动学"""
     data = model.createData()
-    JOINT_ID = 7  # 假设末端执行器关节ID为7
+    JOINT_ID = Config.JOINT_ID
 
     # 参数初始化
-    eps = 1e-4      # 定义收敛阈值，当误差小于该值时认为算法收敛
-    IT_MAX = 1000   # 定义最大迭代次数，防止算法陷入无限循环
-    DT     = 1E-01  # 定义积分步长，用于更新关节角度
-    damp   = 1e-12  # 定义阻尼因子，用于避免矩阵奇异
+    eps = Config.EPS
+    IT_MAX = Config.IT_MAX
+    DT = Config.DT
+    damp = Config.DAMP
   
     oMdes = pin.SE3(rot, np.array(pos))
     q = q_c.copy()
@@ -105,73 +98,96 @@ def solve_ik_sequence(model, pos, rot, q_c=None):
         else:
             return q_c
     
-def plot_3d_trajectory_with_tcp(direct_traj, slerp_traj, step=5, axis_len=0.02):
+def plot_trajectory_comparison(traj_data_jacobian, traj_data_casadi, save_path=None):
     """
-    绘制 Direct 与 SLERP 轨迹，并在采样点绘制 TCP 坐标系（X红，Y绿，Z蓝）
-
-    direct_traj, slerp_traj: [(position, rotation_matrix), ...]
-    step: 绘制姿态的步长
-    axis_len: 坐标系箭头长度
+    绘制两种IK方法的轨迹对比图
+    
+    Args:
+        traj_data_jacobian: Jacobian方法的轨迹数据 [(pos, quat), ...]
+        traj_data_casadi: CasADi方法的轨迹数据 [(pos, quat), ...]
+        save_path: 保存路径
     """
-    fig = plt.figure(figsize=(12, 8))
-    ax = fig.add_subplot(111, projection='3d')
-
+    fig = plt.figure(figsize=(15, 10))
+    
     # 提取位置数据
-    pos_direct = np.array([p for p, _ in direct_traj])
-    pos_slerp = np.array([p for p, _ in slerp_traj])
-
-    # 绘制轨迹线
-    ax.plot(pos_direct[:, 0], pos_direct[:, 1], pos_direct[:, 2],
-            'r-', label='Direct Trajectory', linewidth=2)
-    ax.plot(pos_slerp[:, 0], pos_slerp[:, 1], pos_slerp[:, 2],
-            'b-', label='SLERP Trajectory', linewidth=2)
-
-    # 绘制 TCP 坐标系
-    def draw_tcp_axes(ax, pos, rot_matrix, length=axis_len, alpha=0.8):
-        rot = R.from_matrix(rot_matrix)
-        # 三个方向单位向量
-        axes = np.eye(3) * length
-        colors = ['r', 'g', 'b']  # X红, Y绿, Z蓝
-        for vec, c in zip(axes, colors):
-            dir_vec = rot.apply(vec)  # 旋转到全局
-            ax.quiver(pos[0], pos[1], pos[2],
-                      dir_vec[0], dir_vec[1], dir_vec[2],
-                      color=c, linewidth=1.5, alpha=alpha)
-
-    for i in range(0, len(direct_traj), step):
-        draw_tcp_axes(ax, *direct_traj[i], length=axis_len, alpha=0.8)
-
-    for i in range(0, len(slerp_traj), step):
-        draw_tcp_axes(ax, *slerp_traj[i], length=axis_len, alpha=0.5)
-
-    # 设置标签与标题
-    ax.set_xlabel('X (m)', fontsize=12)
-    ax.set_ylabel('Y (m)', fontsize=12)
-    ax.set_zlabel('Z (m)', fontsize=12)
-    ax.set_title('Direct vs SLERP Trajectories with TCP Frames', fontsize=14)
-    ax.legend()
-
-    # 让三个轴比例相同，避免箭头长度看起来不同
-    def set_axes_equal(ax):
-        limits = np.array([ax.get_xlim3d(), ax.get_ylim3d(), ax.get_zlim3d()])
-        spans = limits[:, 1] - limits[:, 0]
-        centers = np.mean(limits, axis=1)
-        max_span = max(spans)
-        for ctr, axis in zip(centers, [ax.set_xlim3d, ax.set_ylim3d, ax.set_zlim3d]):
-            axis([ctr - max_span / 2, ctr + max_span / 2])
-
-    set_axes_equal(ax)
-    ax.view_init(elev=30, azim=45)
-
+    pos_jac = np.array([pos for pos, _ in traj_data_jacobian])
+    pos_cas = np.array([pos for pos, _ in traj_data_casadi])
+    
+    # 3D轨迹对比
+    ax1 = fig.add_subplot(2, 3, 1, projection='3d')
+    ax1.plot(pos_jac[:, 0], pos_jac[:, 1], pos_jac[:, 2], 'r-', label='Jacobian', linewidth=2)
+    ax1.plot(pos_cas[:, 0], pos_cas[:, 1], pos_cas[:, 2], 'b-', label='CasADi', linewidth=2)
+    ax1.set_xlabel('X (m)')
+    ax1.set_ylabel('Y (m)')
+    ax1.set_zlabel('Z (m)')
+    ax1.set_title('3D Trajectory Comparison')
+    ax1.legend()
+    
+    # 各轴位置对比
+    steps = np.arange(len(pos_jac))
+    ax2 = fig.add_subplot(2, 3, 2)
+    ax2.plot(steps, pos_jac[:, 0], 'r-', label='Jacobian X')
+    ax2.plot(steps, pos_cas[:, 0], 'b-', label='CasADi X')
+    ax2.set_xlabel('Step')
+    ax2.set_ylabel('X Position (m)')
+    ax2.set_title('X Position Comparison')
+    ax2.legend()
+    
+    ax3 = fig.add_subplot(2, 3, 3)
+    ax3.plot(steps, pos_jac[:, 1], 'r-', label='Jacobian Y')
+    ax3.plot(steps, pos_cas[:, 1], 'b-', label='CasADi Y')
+    ax3.set_xlabel('Step')
+    ax3.set_ylabel('Y Position (m)')
+    ax3.set_title('Y Position Comparison')
+    ax3.legend()
+    
+    ax4 = fig.add_subplot(2, 3, 4)
+    ax4.plot(steps, pos_jac[:, 2], 'r-', label='Jacobian Z')
+    ax4.plot(steps, pos_cas[:, 2], 'b-', label='CasADi Z')
+    ax4.set_xlabel('Step')
+    ax4.set_ylabel('Z Position (m)')
+    ax4.set_title('Z Position Comparison')
+    ax4.legend()
+    
+    # 轨迹误差
+    ax5 = fig.add_subplot(2, 3, 5)
+    pos_diff = np.linalg.norm(pos_jac - pos_cas, axis=1)
+    ax5.plot(steps, pos_diff, 'g-', linewidth=2)
+    ax5.set_xlabel('Step')
+    ax5.set_ylabel('Position Error (m)')
+    ax5.set_title('Trajectory Position Error')
+    ax5.grid(True)
+    
+    # 统计信息
+    ax6 = fig.add_subplot(2, 3, 6)
+    ax6.axis('off')
+    stats_text = (
+        "Trajectory Statistics:\n\n"
+        f"Jacobian Start: {np.array2string(pos_jac[0], precision=4)}\n"
+        f"Jacobian End:   {np.array2string(pos_jac[-1], precision=4)}\n"
+        f"Jacobian Distance: {np.sum(np.linalg.norm(np.diff(pos_jac, axis=0), axis=1)):.4f} m\n\n"
+        f"CasADi Start: {np.array2string(pos_cas[0], precision=4)}\n"
+        f"CasADi End:   {np.array2string(pos_cas[-1], precision=4)}\n"
+        f"CasADi Distance: {np.sum(np.linalg.norm(np.diff(pos_cas, axis=0), axis=1)):.4f} m\n\n"
+        f"Average Position Error: {np.mean(pos_diff):.6f} m\n"
+        f"Max Position Error: {np.max(pos_diff):.6f} m"
+    )
+    ax6.text(0.1, 0.9, stats_text, transform=ax6.transAxes, fontsize=10, 
+             verticalalignment='top', fontfamily='monospace')
+    
     plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Trajectory comparison saved to {save_path}")
+    
     plt.show()
-
 
 # ----------------------------------------------------------------------------
 # CasADi-based IK solver (Pinocchio + IPOPT)
 # ----------------------------------------------------------------------------
 
-class CasadiIKSolver:
+class CasadiIKSolver(object):
     """
     CasADi-based IK solver that minimizes SE(3) log error to a target pose
     with joint limits and continuity regularization.
@@ -188,15 +204,15 @@ class CasadiIKSolver:
         # Symbols
         self.cq = cs.SX.sym("q", self.cmodel.nq, 1)
         self.cTf = cs.SX.sym("tf", 4, 4)
-        # self.cq_prev = cs.SX.sym("q_prev", self.cmodel.nq, 1)
+        self.cq_prev = cs.SX.sym("q_prev", self.cmodel.nq, 1)
 
         # Forward kinematics (frames/joints)
         cpin.forwardKinematics(self.cmodel, self.cdata, self.cq)
         # cpin.updateFramePlacements(self.cmodel, self.cdata)
 
         # Use joint placement oMi for the specified joint id
-        current_oMf = self.cdata.oMf[self.joint_id]
-        error_se3 = cpin.log6(current_oMf.inverse() * cpin.SE3(self.cTf)).vector
+        current_oMi = self.cdata.oMi[self.joint_id]
+        error_se3 = cpin.log6(current_oMi.inverse() * cpin.SE3(self.cTf)).vector
         error = casadi.vertcat(error_se3)
         self.error = casadi.Function("error", [self.cq, self.cTf], [casadi.vertcat(error)])
 
@@ -205,7 +221,7 @@ class CasadiIKSolver:
         self.opti = cs.Opti()
         self.var_q = self.opti.variable(self.cmodel.nq)
         self.par_tf = self.opti.parameter(4, 4)
-        # self.par_q_prev = self.opti.parameter(self.cmodel.nq)
+        self.par_q_prev = self.opti.parameter(self.cmodel.nq)
 
         total_error = self.error(self.var_q,self.par_tf)
         self.totalcost = casadi.sumsqr(total_error)
@@ -215,44 +231,93 @@ class CasadiIKSolver:
         self.opti.subject_to(self.opti.bounded(
             self.model.lowerPositionLimit, self.var_q, self.model.upperPositionLimit
         ))
+        
+        # 参数定义
         self.param_q_prev = self.opti.parameter(self.model.nq)  # 上一帧解
         
-        q_diff = self.var_q - self.param_q_prev  # 关节角度变化量
-        continuity_penalty = casadi.sumsqr(q_diff)  # 连续性惩罚权重
-
-        joint_move_penalty = self.opti.parameter()  
-        self.opti.set_value(joint_move_penalty, 0)  
-        joint_move_penalty = 0  
+        # 连续性惩罚 - 关节角度变化量
+        q_diff = self.var_q - self.param_q_prev
+        continuity_penalty = casadi.sumsqr(q_diff)
+        
+        # 关节移动惩罚 - 不同关节的权重不同
+        joint_move_penalty = 0
         for i in range(self.model.nq):
-            weight = 10.0 if i in [0, 1] else 0.01
+            # 前两个关节（基座关节）权重较大，避免大幅移动
+            weight = 2.0 if i in [0,1] else 0.2
             joint_move_penalty = joint_move_penalty + weight * (self.var_q[i] - self.param_q_prev[i])**2
+        
+        # 正则化惩罚 - 避免关节角度过大
+        regularization_penalty = 0.01 * casadi.sumsqr(self.var_q)
+        
+        # 总目标函数 - 平衡精度和连续性
+        total_objective = (20.0 * self.totalcost + 
+                          0.5 * joint_move_penalty + 
+                          0.8 * continuity_penalty + 
+                          0.1 * regularization_penalty)
+        
+        self.opti.minimize(total_objective)
 
-        self.opti.minimize(20 * self.totalcost + joint_move_penalty + 0.2*continuity_penalty)
-
-        # Solver options
+        # Solver options - 改进收敛性和稳定性
         opts = {
             'ipopt': {
                 'print_level': 0,
-                'max_iter': 100,
-                'tol': 1e-4
+                'max_iter': 100,  # 减少最大迭代次数，避免过度优化
+                'tol': 1e-5,      # 放宽收敛条件
+                'acceptable_tol': 1e-4,  # 可接受的收敛条件
+                'hessian_approximation': 'limited-memory',  # 使用L-BFGS近似
+                'mu_strategy': 'adaptive',  # 自适应障碍参数
+                'bound_push': 1e-8,
+                'bound_frac': 1e-8,
+                'slack_bound_push': 1e-8,
+                'slack_bound_frac': 1e-8,
+                'recalc_y': 'yes',
+                'max_cpu_time': 0.1  # 限制求解时间
             },
-            'print_time': False
+            'print_time': False,
+            'expand': True
         }
         self.opti.solver('ipopt', opts)
 
     def solve(self, target_T: np.ndarray, q_init: np.ndarray, q_prev: np.ndarray) -> np.ndarray:
         """Solve IK for target SE3 homogeneous 4x4 matrix."""
-        self.opti.set_initial(self.var_q, q_init)
-        self.opti.set_value(self.par_tf, target_T)
-        self.opti.set_value(self.param_q_prev, q_prev)
         try:
+            # 设置初始值和参数
+            self.opti.set_initial(self.var_q, q_init)
+            self.opti.set_value(self.par_tf, target_T)
+            self.opti.set_value(self.param_q_prev, q_prev)
+            
+            # 尝试求解
             sol = self.opti.solve_limited()
             q_sol = sol.value(self.var_q)
+            
+            # 检查解是否在关节限制范围内
+            if np.any(q_sol < self.model.lowerPositionLimit) or np.any(q_sol > self.model.upperPositionLimit):
+                print("Warning: CasADi solution out of joint limits, using previous solution")
+                return q_prev.copy()
+            
+            # 数值健壮性检查
+            if not np.all(np.isfinite(q_sol)):
+                print("Warning: CasADi solution contains non-finite values, using previous solution")
+                return q_prev.copy()
+            
+            # 步长限制，避免发散
+            step_limit = 0.2  # 每个关节最大变化幅度（弧度）
+            q_sol = np.clip(q_sol, q_prev - step_limit, q_prev + step_limit)
+            
             return q_sol
-        except Exception:
-            # Fallback to previous if solver fails
-            return q_prev.copy()
-
+            
+        except Exception as e:
+            # 如果求解失败，使用Jacobian方法作为后备
+            print(f"CasADi solver failed: {e}, falling back to Jacobian method")
+            try:
+                # 使用Jacobian方法求解
+                pos = target_T[:3, 3]
+                rot = target_T[:3, :3]
+                q_jac = solve_ik_sequence(self.model, pos, rot, q_prev)
+                return q_jac
+            except:
+                # 如果Jacobian也失败，返回上一帧的解
+                return q_prev.copy()
 
 def compute_pose_error_norm(pin_model: pin.Model, pin_data: pin.Data,
                             joint_id: int, q: np.ndarray,
@@ -261,67 +326,66 @@ def compute_pose_error_norm(pin_model: pin.Model, pin_data: pin.Data,
     iMd = pin_data.oMi[joint_id].actInv(pin.SE3(target_T))
     return float(norm(pin.log(iMd).vector))
 
-
 def plot_ik_runtime_and_error(times_jac: list, times_cas: list,
                               errs_jac: list, errs_cas: list,
-                              title_suffix: str = ""):
+                              title_suffix: str = "", save_path: str = None, show: bool = True):
+    """绘制IK求解时间和误差对比图"""
     steps = np.arange(len(times_jac))
-    fig, axs = plt.subplots(1, 2, figsize=(12, 4))
+    fig, axs = plt.subplots(2, 2, figsize=(15, 10))
 
-    axs[0].plot(steps, times_jac, 'r-', label='Jacobian IK (per-step ms)')
-    axs[0].plot(steps, times_cas, 'b-', label='CasADi IK (per-step ms)')
-    axs[0].set_title(f'Runtime per step {title_suffix}')
-    axs[0].set_xlabel('Step')
-    axs[0].set_ylabel('Time (ms)')
-    axs[0].legend()
+    # 求解时间对比
+    axs[0, 0].plot(steps, times_jac, 'r-', label='Jacobian IK', linewidth=2)
+    axs[0, 0].plot(steps, times_cas, 'b-', label='CasADi IK', linewidth=2)
+    axs[0, 0].set_title(f'Runtime per step {title_suffix}')
+    axs[0, 0].set_xlabel('Step')
+    axs[0, 0].set_ylabel('Time (ms)')
+    axs[0, 0].legend()
+    axs[0, 0].grid(True, alpha=0.3)
 
-    axs[1].plot(steps, errs_jac, 'r-', label='Jacobian IK error')
-    axs[1].plot(steps, errs_cas, 'b-', label='CasADi IK error')
-    axs[1].set_title(f'Pose error norm {title_suffix}')
-    axs[1].set_xlabel('Step')
-    axs[1].set_ylabel('||log(iMd)||')
-    axs[1].legend()
+    # 误差对比
+    axs[0, 1].plot(steps, errs_jac, 'r-', label='Jacobian IK', linewidth=2)
+    axs[0, 1].plot(steps, errs_cas, 'b-', label='CasADi IK', linewidth=2)
+    axs[0, 1].set_title(f'Pose error norm {title_suffix}')
+    axs[0, 1].set_xlabel('Step')
+    axs[0, 1].set_ylabel('||log(iMd)||')
+    axs[0, 1].legend()
+    axs[0, 1].grid(True, alpha=0.3)
+
+    # 平均时间统计
+    axs[1, 0].bar(['Jacobian', 'CasADi'], [np.mean(times_jac), np.mean(times_cas)], 
+                  color=['red', 'blue'], alpha=0.7)
+    axs[1, 0].set_title('Average Runtime Comparison')
+    axs[1, 0].set_ylabel('Time (ms)')
+    axs[1, 0].grid(True, alpha=0.3)
+    
+    # 添加数值标签
+    for i, v in enumerate([np.mean(times_jac), np.mean(times_cas)]):
+        axs[1, 0].text(i, v + 0.1, f'{v:.2f}ms', ha='center', va='bottom')
+
+    # 平均误差统计
+    axs[1, 1].bar(['Jacobian', 'CasADi'], [np.mean(errs_jac), np.mean(errs_cas)], 
+                  color=['red', 'blue'], alpha=0.7)
+    axs[1, 1].set_title('Average Error Comparison')
+    axs[1, 1].set_ylabel('Error norm')
+    axs[1, 1].grid(True, alpha=0.3)
+    
+    # 添加数值标签
+    for i, v in enumerate([np.mean(errs_jac), np.mean(errs_cas)]):
+        axs[1, 1].text(i, v + 0.001, f'{v:.4f}', ha='center', va='bottom')
 
     plt.tight_layout()
-    plt.show()
-
+    if save_path:
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Performance comparison saved to {save_path}")
+    if show:
+        plt.show()
+    return fig
 
 def make_homogeneous(rot3x3: np.ndarray, pos3: np.ndarray) -> np.ndarray:
     T = np.eye(4)
     T[:3, :3] = rot3x3
     T[:3, 3] = pos3
     return T
-
-
-# def ik_step_jacobian(model: pin.Model, data: pin.Data, joint_id: int,
-#                      target_T: np.ndarray, q_init: np.ndarray,
-#                      eps: float = 1e-4, it_max: int = 1000,
-#                      dt: float = 1e-1, damp: float = 1e-12) -> np.ndarray:
-#     """One IK step using Jacobian-based iterative solve against target_T."""
-#     oMdes = pin.SE3(target_T)
-#     q = q_init.copy()
-#     i = 0
-#     pin.forwardKinematics(model, data, q)
-#     iMd = data.oMi[joint_id].actInv(oMdes)
-#     err = pin.log(iMd).vector
-#     if norm(err) < eps:
-#         return q
-#     while True:
-#         q = np.asarray(q, dtype=np.float64)
-#         J = pin.computeJointJacobian(model, data, q, joint_id)
-#         Jac = -np.dot(pin.Jlog6(iMd.inverse()), J)
-#         v = -Jac.T.dot(solve(Jac.dot(Jac.T) + damp * np.eye(6), err))
-#         q = pin.integrate(model, q, v * dt)
-#         pin.forwardKinematics(model, data, q)
-#         iMd = data.oMi[joint_id].actInv(oMdes)
-#         err = pin.log(iMd).vector
-#         if norm(err) < eps:
-#             break
-#         if i >= it_max:
-#             break
-#         i += 1
-#     return q
-
 
 def run_ik_comparison(trajectory, pin_model: pin.Model, joint_id: int, q_start: np.ndarray):
     """
@@ -341,7 +405,6 @@ def run_ik_comparison(trajectory, pin_model: pin.Model, joint_id: int, q_start: 
 
     for pos, rot in trajectory:
         T = make_homogeneous(rot, np.asarray(pos))
-
         # Jacobian IK
         t0 = time.perf_counter()
         # q_jac = ik_step_jacobian(pin_model, pin_data, joint_id, T, q_jac)
@@ -361,141 +424,247 @@ def run_ik_comparison(trajectory, pin_model: pin.Model, joint_id: int, q_start: 
 
     return times_jac, times_cas, errs_jac, errs_cas
 
-# # 自定义查看器类
-# class CustomViewer:
-#     def __init__(self, model, data, traj_direct, traj_slerp):
-#         self.model = model
-#         self.data = data
-#         self.viewer = mujoco.viewer.launch_passive(model, data)
-#         self.traj_direct = traj_direct  # 直接轨迹的关节角度序列
-#         self.traj_slerp = traj_slerp    # SLERP轨迹的关节角度序列
-#         self.traj_data_direct = []  # 存储直接轨迹的位置和姿态
-#         self.traj_data_slerp = []   # 存储SLERP轨迹的位置和姿态
+class CustomViewer(object):
+    """自定义MuJoCo查看器，用于实时显示IK求解过程"""
+    
+    def __init__(self, model, data, traj_direct, traj_slerp, model_pin):
+        self.model = model
+        self.model_pin = model_pin
+        self.data = data
+        self.viewer = mujoco.viewer.launch_passive(model, data)
+        self.traj_direct = traj_direct
+        self.traj_slerp = traj_slerp
+        self.traj_data_jacobian = []
+        self.traj_data_casadi = []
+        
+        # 性能统计
+        self.jacobian_times = []
+        self.casadi_times = []
+        self.jacobian_errors = []
+        self.casadi_errors = []
 
 
-#     def run(self):
-#         try:
-#             # 播放直接轨迹
-#             print("Playing direct trajectory")
-#             for pos, rot in self.traj_direct:
-#                 # 当前关节角度作为初值
-#                 q_c = self.data.qpos[:self.model.nq].copy()
-#                 # 求解IK
-#                 q_new = solve_ik_sequence(urdf_path, pos, rot, q_c)
-#                 # 更新到仿真
-#                 self.data.qpos[:len(q_new)] = q_new
-#                 mujoco.mj_forward(self.model, self.data)
-#                 # 记录末端执行器位置和姿态
-#                 ee_pos = self.data.xpos[8].copy()
-#                 ee_quat = self.data.xquat[8].copy()
-#                 ee_quat_xyzw = np.roll(ee_quat, -1)  # 从 [w, x, y, z] 转换为 [x, y, z, w]
-#                 self.traj_data_direct.append((ee_pos, ee_quat_xyzw))
-#                 mujoco.mj_step(self.model, self.data)
-#                 self.viewer.sync()
-#                 time.sleep(0.1)
- 
-#             # 保存直接轨迹数据
-#             np.save("/home/zxy/MujocoBin/Data/NPY/slerp/direct_trajectory_data.npy", np.array(self.traj_data_direct, dtype=object))
-#             print("Direct trajectory data saved to 'direct_trajectory_data.npy'")
+    def run_jacobian_ik(self):
+        """运行Jacobian IK求解"""
+        print("Running Jacobian IK...")
+        for i, (pos, rot) in enumerate(self.traj_slerp):
+            # 当前关节角度作为初值
+            q_c = self.data.qpos[:self.model.nq].copy()
             
-#             # 重置模拟状态
-#             self.data.qpos[:] = q_start  # 重置关节位置
-#             mujoco.mj_forward(self.model, self.data)
+            # 记录开始时间
+            start_time = time.perf_counter()
+            
+            # 求解IK
+            q_new = solve_ik_sequence(self.model_pin, pos, rot, q_c)
+            
+            # 记录求解时间
+            solve_time = (time.perf_counter() - start_time) * 1000.0
+            self.jacobian_times.append(solve_time)
+            
+            # 更新到仿真
+            self.data.qpos[:len(q_new)] = q_new
+            mujoco.mj_forward(self.model, self.data)
+            
+            # 记录末端执行器位置和姿态
+            ee_pos = self.data.xpos[8].copy()
+            ee_quat = self.data.xquat[8].copy()
+            ee_quat_xyzw = np.roll(ee_quat, -1)
+            self.traj_data_jacobian.append((ee_pos, ee_quat_xyzw))
+            
+            # 计算误差
+            target_T = make_homogeneous(rot, np.asarray(pos))
+            error = compute_pose_error_norm(self.model_pin, self.model_pin.createData(), 
+                                          Config.JOINT_ID, q_new, target_T)
+            self.jacobian_errors.append(error)
+            
+            # 仿真步进
+            mujoco.mj_step(self.model, self.data)
+            self.viewer.sync()
+            time.sleep(Config.SIM_DT)
+            
+            # 显示进度
+            if i % 10 == 0:
+                print(f"Jacobian IK: {i}/{len(self.traj_slerp)} steps completed")
+    
+    def run_casadi_ik(self):
+        """运行CasADi IK求解"""
+        print("Running CasADi IK...")
+        cas_solver = CasadiIKSolver(self.model_pin, Config.JOINT_ID)
+        
+        for i, (pos, rot) in enumerate(self.traj_slerp):
+            q_c = self.data.qpos[:self.model.nq].copy()
+            T = make_homogeneous(rot, np.asarray(pos))
+            
+            # 记录开始时间
+            start_time = time.perf_counter()
+            
+            # 求解IK
+            q_new = cas_solver.solve(T, q_c, q_c)
+            
+            # 记录求解时间
+            solve_time = (time.perf_counter() - start_time) * 1000.0
+            self.casadi_times.append(solve_time)
+            
+            # 更新到仿真
+            self.data.qpos[:len(q_new)] = q_new
+            mujoco.mj_forward(self.model, self.data)
+            
+            # 记录末端执行器位置和姿态
+            ee_pos = self.data.xpos[8].copy()
+            ee_quat = self.data.xquat[8].copy()
+            ee_quat_xyzw = np.roll(ee_quat, -1)
+            self.traj_data_casadi.append((ee_pos, ee_quat_xyzw))
+            
+            # 计算误差
+            error = compute_pose_error_norm(self.model_pin, self.model_pin.createData(), 
+                                          Config.JOINT_ID, q_new, T)
+            self.casadi_errors.append(error)
+            
+            # 仿真步进
+            mujoco.mj_step(self.model, self.data)
+            self.viewer.sync()
+            time.sleep(Config.SIM_DT)
+            
+            # 显示进度
+            if i % 10 == 0:
+                print(f"CasADi IK: {i}/{len(self.traj_slerp)} steps completed")
+    
+    def save_data(self):
+        """保存轨迹数据和性能统计"""
+        # 保存轨迹数据
+        jacobian_path = os.path.join(Config.DATA_DIR, "jacobian_data.npy")
+        casadi_path = os.path.join(Config.DATA_DIR, "casadi_data.npy")
+        
+        np.save(jacobian_path, np.array(self.traj_data_jacobian, dtype=object))
+        np.save(casadi_path, np.array(self.traj_data_casadi, dtype=object))
+        
+        print(f"Jacobian data saved to {jacobian_path}")
+        print(f"CasADi data saved to {casadi_path}")
+        
+        # 保存性能统计
+        performance_data = {
+            'jacobian_times': self.jacobian_times,
+            'casadi_times': self.casadi_times,
+            'jacobian_errors': self.jacobian_errors,
+            'casadi_errors': self.casadi_errors
+        }
+        
+        performance_path = os.path.join(Config.DATA_DIR, "performance_data.npy")
+        np.save(performance_path, performance_data)
+        print(f"Performance data saved to {performance_path}")
+    
+    def plot_results(self):
+        """绘制结果对比图"""
+        # 轨迹对比
+        trajectory_path = os.path.join(Config.DATA_DIR, "trajectory_comparison.png")
+        plot_trajectory_comparison(self.traj_data_jacobian, self.traj_data_casadi, trajectory_path)
+        
+        # 性能对比
+        performance_path = os.path.join(Config.DATA_DIR, "performance_comparison.png")
+        plot_ik_runtime_and_error(self.jacobian_times, self.casadi_times, 
+                                 self.jacobian_errors, self.casadi_errors,
+                                 title_suffix='(Real-time Simulation)', save_path=performance_path, show=False)
+    
+    def print_statistics(self):
+        """打印统计信息"""
+        print("\n" + "="*50)
+        print("SIMULATION STATISTICS")
+        print("="*50)
+        
+        print(f"Jacobian IK - Avg time: {np.mean(self.jacobian_times):.3f} ms, "
+              f"Final error: {self.jacobian_errors[-1]:.6f}")
+        print(f"CasADi IK   - Avg time: {np.mean(self.casadi_times):.3f} ms, "
+              f"Final error: {self.casadi_errors[-1]:.6f}")
+        
+        print(f"\nTrajectory start (Jacobian): {self.traj_data_jacobian[0][0]}")
+        print(f"Trajectory end   (Jacobian): {self.traj_data_jacobian[-1][0]}")
+        print(f"Trajectory start (CasADi):   {self.traj_data_casadi[0][0]}")
+        print(f"Trajectory end   (CasADi):   {self.traj_data_casadi[-1][0]}")
+        print("="*50)
+    
+    def run(self):
+        """主运行方法"""
+        try:
+            # 运行Jacobian IK
+            self.run_jacobian_ik()
+            
+            # 重置模拟状态
+            self.data.qpos[:] = Config.Q_START
+            mujoco.mj_forward(self.model, self.data)
+            
+            # 运行CasADi IK
+            self.run_casadi_ik()
+            
+            # 保存数据
+            self.save_data()
+            
+            # 显示统计信息
+            self.print_statistics()
+            
+            # 绘制结果
+            self.plot_results()
+            
+            # 保持窗口打开
+            print("Simulation completed. Press Ctrl+C to close viewer.")
+            while self.viewer.is_running():
+                self.viewer.sync()
+                time.sleep(0.01)
 
-#             # 播放SLERP轨迹
-#             print("Playing SLERP trajectory with IK")
-#             for pos, rot in self.traj_slerp:
-#                 q_c = self.data.qpos[:self.model.nq].copy()
-#                 q_new = solve_ik_sequence(urdf_path, pos, rot, q_c)
-#                 self.data.qpos[:len(q_new)] = q_new
-#                 mujoco.mj_forward(self.model, self.data)
-#                 ee_pos = self.data.xpos[8].copy()
-#                 ee_quat = self.data.xquat[8].copy()
-#                 ee_quat_xyzw = np.roll(ee_quat, -1)  # 从 [w, x, y, z] 转换为 [x, y, z, w]
-#                 self.traj_data_slerp.append((ee_pos, ee_quat_xyzw))
-#                 mujoco.mj_step(self.model, self.data)
-#                 self.viewer.sync()
-#                 time.sleep(0.1)
-                
-#             np.save("/home/zxy/MujocoBin/Data/NPY/slerp/slerp_trajectory_data.npy", np.array(self.traj_data_slerp, dtype=object))
-#             print("SLERP trajectory data saved to 'slerp_trajectory_data.npy'")
-
-
-#             # 检查轨迹数据的起点和终点
-#             print("Direct trajectory start:", self.traj_data_direct[0][0])
-#             print("Direct trajectory end:", self.traj_data_direct[-1][0])
-#             print("SLERP trajectory start:", self.traj_data_slerp[0][0])
-#             print("SLERP trajectory end:", self.traj_data_slerp[-1][0])
-
-#             # 保持窗口打开
-#             while self.viewer.is_running():
-#                 self.viewer.sync()
-#                 time.sleep(0.01)
-
-#         finally:
-#             self.viewer.close()
+        except KeyboardInterrupt:
+            print("\nSimulation interrupted by user.")
+        except Exception as e:
+            print(f"Error during simulation: {e}")
+        finally:
+            self.viewer.close()
 
 # 主程序
 if __name__ == "__main__":
-    # pinocchio 和 MuJoCo 模型路径
-    urdf_path = "/home/zxy/MujocoBin/mujoco-learning/model/franka_panda_description/robots/panda_description/urdf/panda.urdf"
-    xml_path = "/home/zxy/MujocoBin/mujoco_menagerie-main/franka_emika_panda/scene.xml"
+    print("="*60)
+    print("IK COMPARISON: Jacobian vs CasADi Methods")
+    print("="*60)
     
     # MuJoCo 模型加载
-    model = mujoco.MjModel.from_xml_path(xml_path)
+    model = mujoco.MjModel.from_xml_path(Config.XML_PATH)
     data = mujoco.MjData(model)
 
     # 用 pinocchio 正运动学计算对应的位姿
-    model_pin = pin.buildModelFromUrdf(urdf_path)
+    model_pin = pin.buildModelFromUrdf(Config.URDF_PATH)
     data_pin = model_pin.createData()
 
-
     # 关节零位附近，避免奇异姿态
-    q_start = np.array([0.2, -0.5, 0.2, -1.7, 0.1, 1.6, 0.9, 0.0, 0.0])  # 起始关节角度
-    q_end   = np.array([0.0, -0.4, 0.0, -1.8, 0.0, 1.4, 0.8, 0.0, 0.0])  # 结束关节角度
+    q_start = Config.Q_START
+    q_end = Config.Q_END
     
-    # 起点位姿
-    pin.forwardKinematics(model_pin, data_pin, q_start)
-    p0 = data_pin.oMi[7].translation.tolist()
-    q0 = R.from_matrix(data_pin.oMi[7].rotation).as_quat().tolist()
-
-    # 终点位姿
-    pin.forwardKinematics(model_pin, data_pin, q_end)
-    p1 = data_pin.oMi[7].translation.tolist()
-    q1 = R.from_matrix(data_pin.oMi[7].rotation).as_quat().tolist()
-
     # 更新到模拟
     data.qpos[:len(q_start)] = q_start
     mujoco.mj_forward(model, data)
 
-    N = 50  # 插值点数
+    # 生成安全的轨迹
+    print("Generating safe trajectory...")
+    traj_direct, traj_slerp, p0, p1 = generate_safe_trajectory(model_pin, q_start, q_end, Config.N_POINTS)
 
-    # 生成两条轨迹(xyzw)
-    traj_direct = interpolate_SE3(p0, p1, q0, q1, N, use_slerp=False)
-    traj_slerp = interpolate_SE3(p0, p1, q0, q1, N, use_slerp=True)
+    print(f"Generated trajectory with {Config.N_POINTS} points")
+    print(f"Start position: {p0}")
+    print(f"End position: {p1}")
 
-    # # 绘图
-    # plot_3d_trajectory_with_tcp(traj_direct, traj_slerp)
-
-    # ---------------------------------------------------------------------
-    # Compare Jacobian IK vs CasADi IK on the same SLERP trajectory
-    # ---------------------------------------------------------------------
-    JOINT_ID = 7  # End-effector joint index in Pinocchio model
-
-    print("Running IK comparison over trajectory...")
-    times_jac, times_cas, errs_jac, errs_cas = run_ik_comparison(traj_slerp, model_pin, JOINT_ID, q_start[:model_pin.nq])
+    # 预运行IK比较（不显示仿真）
+    print("\nRunning pre-simulation IK comparison...")
+    times_jac, times_cas, errs_jac, errs_cas = run_ik_comparison(traj_slerp, model_pin, Config.JOINT_ID, q_start[:model_pin.nq])
         
-
     print(f"Jacobian IK avg time (ms): {np.mean(times_jac):.3f} | final err: {errs_jac[-1]:.6f}")
     print(f"CasADi  IK avg time (ms): {np.mean(times_cas):.3f} | final err: {errs_cas[-1]:.6f}")
 
+    # 绘制预运行结果并保存
+    pre_perf_path = os.path.join(Config.DATA_DIR, "pre_sim_performance.png")
     plot_ik_runtime_and_error(times_jac, times_cas, errs_jac, errs_cas,
-                              title_suffix='(SLERP trajectory)')
+                              title_suffix='(Pre-simulation)', save_path=pre_perf_path, show=False)
+    plt.show()
+    print(f"Pre-simulation performance saved to {pre_perf_path}")
 
-    # # 求解逆运动学，生成关节角度序列
-    # q_c = data.qpos.copy()  # 当前关节角度作为初始值
-    # print("当前所有关节角度/位置:", q_c)
+    print("\nStarting real-time simulation...")
+    print("Press Ctrl+C to stop simulation early")
 
-    # # 创建并运行查看器
-    # viewer = CustomViewer(model, data, traj_direct, traj_slerp)
-    # viewer.run()
+    # 创建并运行查看器
+    viewer = CustomViewer(model, data, traj_direct, traj_slerp, model_pin)
+    viewer.run()
+
